@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+*.dump
+*.sql.gz
+*.backup
+backups/
+**/metadata-backups/
+**/project-isolation/backups/
+__pycache__/
+*.py[cod]
+.DS_Store
