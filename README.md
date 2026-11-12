@@ -7,7 +7,7 @@ database contents.
 
 ## Security and scope
 
-- This repository is public. It must never contain `.env` files, credentials,
+- This repository is private. It must never contain `.env` files, credentials,
   private keys, database dumps, Hasura metadata backups, auth reset scripts, or
   customer data.
 - Supply secrets locally through a mode-0600 `.env` file. Start from
