@@ -28,6 +28,18 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "$LARAVEL_MIGRATE_USER" IN SCHEMA public GRANT
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO "$BACKUP_USER";
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "$BACKUP_USER";
 EOSQL
+# Read-only runtime identity for the project credential broker.
+if [ -n "${BROKER_DB_PASSWORD:-}" ]; then
+psql -v ON_ERROR_STOP=1 -v broker_password="$BROKER_DB_PASSWORD" -v broker_database="$POSTGRES_DB" --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'EOSQL3'
+SELECT format(
+  'CREATE ROLE nhost_broker LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD %L',
+  :'broker_password'
+)
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nhost_broker')
+\gexec
+SELECT format('GRANT CONNECT ON DATABASE %I TO nhost_broker', :'broker_database') \gexec
+EOSQL3
+fi
 # Phase B+: Nhost platform admin role (guarded; runs on fresh volumes and is idempotent)
 if [ -n "${HASURA_ADMIN_USER:-}" ]; then
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<EOSQL2
@@ -46,3 +58,4 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "$POSTGRES_USER", "$LARAVEL_MIGRATE_USER" IN S
 ALTER DEFAULT PRIVILEGES FOR ROLE "$POSTGRES_USER", "$LARAVEL_MIGRATE_USER" IN SCHEMA public GRANT ALL ON SEQUENCES TO "$HASURA_ADMIN_USER";
 EOSQL2
 fi
+
