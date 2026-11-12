@@ -70,3 +70,4 @@ Keep the WebView on Neon and do not cut over application traffic. Next decision:
 choose CE auth hook (with its per-request verifier dependency) or a licensed
 Hasura edition with native multiple JWT verifiers. Then implement broker and
 prove issuer separation, revocation, expiry, and project isolation in staging.
+
