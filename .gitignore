@@ -34,3 +34,4 @@ wg/
 
 # Local config overrides
 config/*.local.yml
+.broker-keys/
