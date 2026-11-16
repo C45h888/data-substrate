@@ -1,0 +1,32 @@
+# Secrets - never commit
+.env
+.env.*
+!.env.example
+*.creds
+.bootstrap-pw
+
+# Database dumps / backups - never commit (may contain user data)
+backups/
+*.dump
+*.sql.gz
+*.bak
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# OS / editor
+.DS_Store
+*.swp
+*.swo
+*~
+
+# WireGuard keys (if ever placed in repo)
+*.priv
+*.pub
+wg0.conf
+wg/
+
+# Local config overrides
+config/*.local.yml

@@ -1,0 +1,127 @@
+name: nhost-kamesh
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nhost-kamesh-postgres-1
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PGPORT_HOST:-5434}:5432"
+      - "10.9.0.1:${PGPORT_HOST:-5434}:5432"
+    env_file:
+      - .env
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+      - ./backups:/backups
+    command: >
+      postgres
+      -c shared_buffers=128MB
+      -c effective_cache_size=512MB
+      -c max_connections=100
+      -c shared_preload_libraries=pg_stat_statements
+      -c log_min_duration_statement=1000
+      -c log_connections=on
+      -c log_disconnections=on
+    mem_limit: 768m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - nhost-kamesh-net
+  graphql:
+    image: nhost/graphql-engine:v2.46.0-ce
+    container_name: nhost-kamesh-graphql-1
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${HASURA_PORT_HOST:-8080}:8080"
+      - "10.9.0.1:${HASURA_PORT_HOST:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      HASURA_GRAPHQL_DATABASE_URL: postgres://${HASURA_ADMIN_USER}:${HASURA_ADMIN_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      HASURA_GRAPHQL_ADMIN_SECRET: ${GRAPHQL_ADMIN_SECRET}
+      HASURA_GRAPHQL_JWT_SECRET: ${JWT_SECRET}
+      HASURA_GRAPHQL_ENABLE_CONSOLE: "false"
+      HASURA_GRAPHQL_DEV_MODE: "false"
+      HASURA_GRAPHQL_ENABLE_TELEMETRY: "false"
+      HASURA_GRAPHQL_LOG_LEVEL: warn
+      HASURA_GRAPHQL_PG_CONNECTIONS: "20"
+      HASURA_GRAPHQL_ENABLED_APIS: metadata,graphql,pgdump
+    mem_limit: 384m
+    cpus: 0.5
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "/usr/bin/bash -c 'exec 3<>/dev/tcp/localhost/8080 && printf \"GET /healthz HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q 200 <&3'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - nhost-kamesh-net
+  auth:
+    image: nhost/auth:0.52.0
+    container_name: nhost-kamesh-auth-1
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${AUTH_PORT_HOST:-4000}:4000"
+      - "10.9.0.1:${AUTH_PORT_HOST:-4000}:4000"
+    env_file:
+      - .env
+    environment:
+      AUTH_HOST: "0.0.0.0"
+      AUTH_PORT: "4000"
+      AUTH_API_PREFIX: /v1
+      AUTH_SERVER_URL: ${AUTH_SERVER_URL}
+      AUTH_CLIENT_URL: ${AUTH_CLIENT_URL}
+      HASURA_GRAPHQL_ADMIN_SECRET: ${GRAPHQL_ADMIN_SECRET}
+      HASURA_GRAPHQL_GRAPHQL_URL: http://graphql:8080/v1/graphql
+      HASURA_GRAPHQL_JWT_SECRET: ${JWT_SECRET}
+      HASURA_GRAPHQL_DATABASE_URL: postgres://${HASURA_ADMIN_USER}:${HASURA_ADMIN_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      POSTGRES_MIGRATIONS_CONNECTION: postgres://${HASURA_ADMIN_USER}:${HASURA_ADMIN_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      AUTH_SMTP_HOST: ${AUTH_SMTP_HOST}
+      AUTH_SMTP_PORT: ${AUTH_SMTP_PORT}
+      AUTH_SMTP_USER: ${AUTH_SMTP_USER}
+      AUTH_SMTP_PASS: ${AUTH_SMTP_PASS}
+      AUTH_SMTP_SECURE: ${AUTH_SMTP_SECURE}
+      AUTH_SMTP_SENDER: ${AUTH_SMTP_SENDER}
+    mem_limit: 256m
+    cpus: 0.5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      graphql:
+        condition: service_healthy
+    # No container healthcheck: the distroless image has no shell (upstream wget check cannot run).
+    # Liveness is verified externally (loopback /healthz + API probes). See EXECUTION_LOG.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - nhost-kamesh-net
+networks:
+  nhost-kamesh-net:
+    name: nhost-kamesh-net
+    driver: bridge
+volumes:
+  pgdata:
+    name: nhost-kamesh-pgdata
