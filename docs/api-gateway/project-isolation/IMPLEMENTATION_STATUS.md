@@ -22,6 +22,8 @@ Date: 2026-11-10
   the new buckets. Public Storage access is absent.
 - Added a production owner membership for the existing verified Auth account.
   Identity details are intentionally omitted from this log.
+- The reusable metadata script now accepts `OWNER_AUTH_USER_ID` from the
+  operator's environment instead of embedding a personal email address.
 - Backed up the database and Hasura metadata before changes. Applied the schema
   and metadata changes without restarting the live Hasura service.
 
@@ -68,3 +70,4 @@ Keep the WebView on Neon and do not cut over application traffic. Next decision:
 choose CE auth hook (with its per-request verifier dependency) or a licensed
 Hasura edition with native multiple JWT verifiers. Then implement broker and
 prove issuer separation, revocation, expiry, and project isolation in staging.
+

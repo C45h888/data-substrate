@@ -10,9 +10,13 @@ backups/
 *.dump
 *.sql.gz
 *.bak
+*.backup
+**/metadata-backups/
+**/project-isolation/backups/
 
 # Python cache
 __pycache__/
+*.py[cod]
 *.pyc
 *.pyo
 

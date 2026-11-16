@@ -92,3 +92,4 @@ WHERE d.state='completed' AND d.deleted_at IS NULL AND c.deleted_at IS NULL AND 
 GROUP BY d.project_id,d.campaign_id,d.currency_code;
 COMMIT;
 
+

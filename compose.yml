@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:${PGPORT_HOST:-5434}:5432"
-      - "10.9.0.1:${PGPORT_HOST:-5434}:5432"
+      - "${WG_SERVER_ADDRESS:?Set WG_SERVER_ADDRESS in .env}:${PGPORT_HOST:-5434}:5432"
     env_file:
       - .env
     environment:
@@ -45,13 +45,14 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:${HASURA_PORT_HOST:-8080}:8080"
-      - "10.9.0.1:${HASURA_PORT_HOST:-8080}:8080"
+      - "${WG_SERVER_ADDRESS:?Set WG_SERVER_ADDRESS in .env}:${HASURA_PORT_HOST:-8080}:8080"
     env_file:
       - .env
     environment:
       HASURA_GRAPHQL_DATABASE_URL: postgres://${HASURA_ADMIN_USER}:${HASURA_ADMIN_PASSWORD}@postgres:5432/${POSTGRES_DB}
       HASURA_GRAPHQL_ADMIN_SECRET: ${GRAPHQL_ADMIN_SECRET}
-      HASURA_GRAPHQL_JWT_SECRET: ${JWT_SECRET}
+      HASURA_GRAPHQL_AUTH_HOOK: http://credential-broker:8000/internal/hasura-auth
+      HASURA_GRAPHQL_AUTH_HOOK_MODE: POST
       HASURA_GRAPHQL_ENABLE_CONSOLE: "false"
       HASURA_GRAPHQL_DEV_MODE: "false"
       HASURA_GRAPHQL_ENABLE_TELEMETRY: "false"
@@ -62,6 +63,8 @@ services:
     cpus: 0.5
     depends_on:
       postgres:
+        condition: service_healthy
+      credential-broker:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "/usr/bin/bash -c 'exec 3<>/dev/tcp/localhost/8080 && printf \"GET /healthz HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q 200 <&3'"]
@@ -76,13 +79,56 @@ services:
         max-file: "3"
     networks:
       - nhost-kamesh-net
+  credential-broker:
+    build:
+      context: ./broker
+    container_name: nhost-kamesh-credential-broker-1
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${BROKER_PORT_HOST:-8091}:8000"
+    environment:
+      BROKER_DATABASE_URL: postgresql://nhost_broker:${BROKER_DB_PASSWORD:?Set BROKER_DB_PASSWORD in .env}@postgres:5432/${POSTGRES_DB}
+      BROKER_AUTH_URL: http://auth:4000/v1
+      BROKER_TOKEN_ISSUER: https://api.888intelligence.org/broker
+      BROKER_TOKEN_AUDIENCE: hasura
+      BROKER_TOKEN_TTL_SECONDS: "600"
+      BROKER_PRIVATE_KEY_FILE: /run/broker-keys/private.pem
+      BROKER_PUBLIC_KEY_FILE: /run/broker-keys/public.pem
+    volumes:
+      - ${BROKER_KEY_DIR:?Set BROKER_KEY_DIR in .env}:/run/broker-keys:ro
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    cpus: 0.25
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - nhost-kamesh-net
   auth:
     image: nhost/auth:0.52.0
     container_name: nhost-kamesh-auth-1
     restart: unless-stopped
     ports:
       - "127.0.0.1:${AUTH_PORT_HOST:-4000}:4000"
-      - "10.9.0.1:${AUTH_PORT_HOST:-4000}:4000"
+      - "${WG_SERVER_ADDRESS:?Set WG_SERVER_ADDRESS in .env}:${AUTH_PORT_HOST:-4000}:4000"
     env_file:
       - .env
     environment:
@@ -125,3 +171,4 @@ networks:
 volumes:
   pgdata:
     name: nhost-kamesh-pgdata
+

@@ -1,5 +1,8 @@
-import json,subprocess,urllib.request,urllib.error,os
+import json,subprocess,urllib.request,urllib.error,os,uuid
+from pathlib import Path
 BASE='http://127.0.0.1:8082'
+ROOT=Path(__file__).resolve().parents[3]
+OWNER_AUTH_USER_ID=str(uuid.UUID(os.environ['OWNER_AUTH_USER_ID']))
 c=json.loads(subprocess.check_output(['docker','inspect','nhost-kamesh-graphql-1'],text=True))[0]
 env=dict(x.split('=',1) for x in c['Config']['Env'] if '=' in x)
 secret=env['HASURA_GRAPHQL_ADMIN_SECRET']
@@ -13,13 +16,12 @@ def call(path,payload):
   raise SystemExit(2)
 def meta(op,args):return call('/v1/metadata',{'type':op,'args':args})
 # Grant the Hasura database role read access to the private membership relation; this is DB-side only.
-subprocess.run(['docker','compose','exec','-T','postgres','psql','-v','ON_ERROR_STOP=1','-U','postgres','-d','appdb','-c','GRANT USAGE ON SCHEMA platform TO hasura_admin; GRANT SELECT ON ALL TABLES IN SCHEMA platform TO hasura_admin;'],cwd='/home/kamesh62/nhost',check=True,stdout=subprocess.DEVNULL)
+subprocess.run(['docker','compose','exec','-T','postgres','psql','-v','ON_ERROR_STOP=1','-U','postgres','-d','appdb','-c','GRANT USAGE ON SCHEMA platform TO hasura_admin; GRANT SELECT ON ALL TABLES IN SCHEMA platform TO hasura_admin;'],cwd=ROOT,check=True,stdout=subprocess.DEVNULL)
 # The sole verified owner account receives read-only membership in this project.
 sql="""INSERT INTO platform.project_memberships(project_id,user_id,membership_role,status)
 SELECT '01M71YVC337C0NQQ9FY8B3NH2H',id,'owner','active' FROM auth.users
-WHERE lower(email)='kamransait41@gmail.com' AND email_verified=true
-ON CONFLICT(project_id,user_id) DO UPDATE SET membership_role='owner',status='active'"""
-r=subprocess.run(['docker','compose','exec','-T','postgres','psql','-v','ON_ERROR_STOP=1','-U','postgres','-d','appdb','-c',sql],cwd='/home/kamesh62/nhost',capture_output=True,text=True,check=True)
+WHERE id='"""+OWNER_AUTH_USER_ID+"'::uuid AND email_verified=true\nON CONFLICT(project_id,user_id) DO UPDATE SET membership_role='owner',status='active'"
+r=subprocess.run(['docker','compose','exec','-T','postgres','psql','-v','ON_ERROR_STOP=1','-U','postgres','-d','appdb','-c',sql],cwd=ROOT,capture_output=True,text=True,check=True)
 # Export metadata once and track only missing tables.
 m=call('/v1/metadata',{'type':'export_metadata','args':{}})
 tracked={(x['table']['schema'],x['table']['name']) for s in m.get('sources',[]) if s['name']=='default' for x in s.get('tables',[])}

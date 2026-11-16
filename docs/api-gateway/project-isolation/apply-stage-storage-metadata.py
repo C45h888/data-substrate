@@ -9,7 +9,8 @@ def api(payload):
  except urllib.error.HTTPError as e:
   print('STAGE_STORAGE_METADATA_FAILED='+payload.get('type','?')+'; HTTP='+str(e.code)+'; '+e.read().decode(errors='replace')[:500]);raise SystemExit(2)
 def meta(op,args):return api({'type':op,'args':args})
-db='/home/kamesh62/nhost'
+from pathlib import Path
+db=str(Path(__file__).resolve().parents[3])
 subprocess.run(['docker','compose','exec','-T','postgres','psql','-v','ON_ERROR_STOP=1','-U','postgres','-d','appdb_project_stage_20261110','-c','GRANT USAGE ON SCHEMA platform,storage TO hasura_admin; GRANT SELECT ON ALL TABLES IN SCHEMA platform,storage TO hasura_admin;'],cwd=db,check=True,stdout=subprocess.DEVNULL)
 m=api({'type':'export_metadata','args':{}})
 tracked={(s['name'],t['table']['schema'],t['table']['name']):t for s in m.get('sources',[]) for t in s.get('tables',[])}

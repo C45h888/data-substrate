@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-BASE=/home/kamesh62/nhost
+BASE="$(cd "$(dirname "$0")/.." && pwd)"
 cd $BASE
 TS=$(date +%Y%m%d-%H%M%S)
 BACKUP_FILE="$BASE/backups/appdb-$TS.dump"
