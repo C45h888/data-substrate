@@ -112,9 +112,11 @@ is read-only except where the owner explicitly approved a change (mail fix, UFW 
   safe aggregate view, curated read-only Hasura roles, membership checks, and
   logical per-environment Storage buckets. See
   `docs/api-gateway/project-isolation/IMPLEMENTATION_STATUS.md`.
-- Broker/token exchange is not deployed. Hasura CE v2.46 cannot use the planned
-  multiple JWT verifier configuration. Owner decision required: CE auth hook or
-  licensed multi-verifier edition. Keep WebView on Neon until broker and staging
-  isolation/revocation/expiry checks pass.
+- Broker/token exchange is not deployed. Architecture decision (2026-11-16):
+  Hasura CE + POST auth hook; the paid multi-verifier edition is retired. The
+  broker draft (exchange, dual-verifier hook, jti, project-bound audience,
+  decision audit table migration 004, per-credential rate caps) passes its local
+  unit suite; deployment stays gated on the staged isolation/revocation/expiry
+  matrix. Keep WebView on Neon until those checks pass.
 - Open verification: live Storage upload path, physical MinIO object inventory,
   and project-specific payment provider uniqueness/lookup design.

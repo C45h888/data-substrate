@@ -196,12 +196,43 @@ Secrets are never recorded here — only names, locations, and verification outc
 - Storage permission checks passed in staging; a live upload was not verified.
   Physical MinIO object inventory remains open. No existing `default` bucket
   permissions or contents were removed.
-- **Security gate:** no broker, credentials, signing key, or broker route deployed.
-  Hasura CE v2.46 does not support the planned `HASURA_GRAPHQL_JWT_SECRETS`
-  dual-verifier setup; live Auth issuer configuration remains unchanged. Choose
-  an approved CE auth hook or a Hasura edition with native multiple verifiers
-  before broker JWTs. Shared Auth HS256 broker signing is not recommended.
+- **Security gate (updated 2026-11-16):** no broker, credentials, signing key,
+  or broker route deployed; live Auth issuer configuration remains unchanged.
+  Decision: CE + POST auth hook (paid edition retired; `HASURA_GRAPHQL_JWT_SECRETS`
+  dual-verifier plan abandoned). Shared Auth HS256 broker signing remains
+  prohibited. Tiered item status lives in `docs/FEATURE_ASSESSMENT.md`.
 - `payment_providers` gained project IDs, but its global unique code and Laravel
   lookup contract were left unchanged; duplicate per-project provider configs
   remain a separately reviewed item. Neon, WebView, payments, DNS, and Nginx
   were not changed. Keep Neon active; no cutover.
+
+## Broker Tier-1 close-out, local draft only (2026-11-16)
+- Owner-approved preliminary change set (feature assessment → plan → execute).
+  Scope: close Tier-1 code gaps in the broker draft and reconcile docs. NOTHING
+  was deployed: no live Hasura/Auth/Postgres/Storage change, no keys generated,
+  no Neon/WebView/WG/DNS touch.
+- Implemented (broker/app.py): `jti` (uuid4) on all issued tokens; audience
+  bound to the credential's project (`hasura:<project_id>`) and verified at the
+  hook (cross-project replay rejected); decision audit sink
+  (`PostgresDecisionAudit`, best-effort, never blocks a decision, stores no
+  tokens/bodies); per-credential exchange rate caps (public 30/min, service
+  10/min) on top of per-IP limits, with audit on denial; audit events issued /
+  allowed / denied with reason details.
+- Implemented (migration 004-credential-decisions.sql): `platform.credential_decisions`
+  (decision, credential_id, role, jti, detail) with INSERT-only grant to
+  `nhost_broker` — the runtime role cannot read or alter the audit trail.
+  Additive; migrations 001–003 untouched.
+- Verified: broker unit suite extended to 11 tests (negative matrix seeds:
+  expired, tampered, cross-project audience, revoked-after-issue, role override,
+  rate-limit trip, audit-row assertions) — 11/11 pass locally;
+  `docker compose config -q` passes with placeholder env (temporary env file
+  removed after check; repo still contains no `.env`).
+- Documented: new `docs/FEATURE_ASSESSMENT.md` (tiered item-by-item status);
+  README, BROKER.md, IMPLEMENTATION_STATUS.md, ROADMAP.md updated to record the
+  CE + auth-hook decision (paid edition retired) and the new token/audit/rate
+  behavior. TTL stays 600s (stricter than the assessment's 15-minute bound).
+- Open / partial (tracked in FEATURE_ASSESSMENT.md Tier 2): staged end-to-end
+  negative matrix against a live stack, key rotation/JWKS + compromise
+  procedure, hook-failure-mode staged proof, formal scope vocabulary doc.
+  Tier 3 (RLS backstop, portal, storage parity, write-path decision,
+  observability) untouched by design.

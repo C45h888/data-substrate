@@ -1,6 +1,6 @@
 # Project-scoped Hasura access — implementation status
 
-Date: 2026-11-10
+Date: 2026-11-10 (broker status updated 2026-11-16)
 
 ## Implemented
 
@@ -45,18 +45,23 @@ Date: 2026-11-10
 - Neon and the WebView were not changed. No payment logic, DNS, Nginx, or live
   Auth issuer configuration was changed.
 
-## Not implemented / security gate
+## Not implemented / security gate (updated 2026-11-16)
 
-- No credential-broker service, public/private client credentials, signing key,
-  broker route, or broker token exchange has been deployed.
-- The planned `HASURA_GRAPHQL_JWT_SECRETS` dual-verifier configuration is not
-  supported by the deployed Hasura Community Edition runtime according to the
-  official edition documentation. The temporary test confirmed it cannot verify
-  both issuers as configured. Live Hasura still uses its existing Auth issuer.
-- Do not issue broker RS256 tokens until an approved CE-compatible auth hook is
-  deployed and tested, or the engine is upgraded to an edition supporting
-  multiple JWT verifiers. Reusing the Auth HS256 signing key for the broker is
-  not recommended because it would let the broker forge user tokens.
+- Architecture decision recorded: Hasura CE + POST auth hook; the paid
+  multi-verifier edition is retired. The broker draft in `broker/` implements
+  the hook and verifies both token families itself; the
+  `HASURA_GRAPHQL_JWT_SECRETS` dual-verifier plan is abandoned.
+- The broker is a reviewed local draft only. No signing key, credential, or
+  broker route is deployed, and live Hasura still uses its existing Auth issuer.
+  Tier-1 code gaps (jti, project-bound audience, decision audit log,
+  per-credential rate caps) are closed in the draft; see
+  `docs/FEATURE_ASSESSMENT.md` for the item-by-item status.
+- Do not issue broker RS tokens on any live system until migration 004 is
+  applied on the target, the broker is deployed behind the rollout gate in
+  `BROKER.md`, and the staged negative matrix passes.
+- Migration 005 enforces strict scope families: public={public_read}→client_public, service={service_read[,service_write]}→service_reader/service_writer, enforced at issuance/exchange/hook. Credential issuance is operator-script-only by design (no HTTP credential-management endpoint, no admin secret).
+- Reusing the Auth HS256 signing key for the broker remains prohibited: the
+  broker signs with its own owner-placed RS256 key pair.
 - Physical MinIO bucket/object inventory was not completed. No Storage object
   canary was uploaded live; existing `default` bucket permissions were retained.
 - `payment_providers` is tagged with project IDs, but existing global unique

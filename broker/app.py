@@ -1,12 +1,13 @@
-"""Project-scoped credential exchange and Hasura Community Edition auth hook."""
+"""Project-scoped credential exchange and Hasura Community Edition auth hook.
+
+Thin transport layer: HTTP parsing, status mapping, and audit recording.
+Lifecycle logic lives in tokens.py, key management in keys.py, and rate
+limiting in ratelimit.py.
+"""
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
-import os
-import threading
-import time
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -17,9 +18,22 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-HASURA_CLAIMS = "https://hasura.io/jwt/claims"
-PUBLIC_ROLE = "client_public"
-SERVICE_ROLE = "service_reader"
+from keys import LEGACY_KID, KeyStore, key_dir_configured
+from ratelimit import ExchangeLimiters
+from tokens import (
+    HASURA_CLAIMS,
+    PUBLIC_ROLE,
+    SERVICE_ROLE,
+    WRITER_ROLE,
+    TokenDenied,
+    TokenUnavailable,
+    authorize_hook_token,
+    check_credential_active,
+    mint_with_secret,
+    verify_broker_token,
+)
+
+AUDIT_LOGGER = logging.getLogger("broker.audit")
 
 
 class Unauthorized(Exception):
@@ -38,10 +52,14 @@ class Settings:
     audience: str
     private_key_file: str
     public_key_file: str
+    key_dir: str = "/run/broker-keys"
+    key_poll_seconds: int = 15
     token_ttl_seconds: int = 600
 
     @classmethod
     def from_env(cls) -> "Settings":
+        import os
+
         return cls(
             database_url=os.environ["BROKER_DATABASE_URL"],
             auth_url=os.getenv("BROKER_AUTH_URL", "http://auth:4000/v1").rstrip("/"),
@@ -49,12 +67,63 @@ class Settings:
             audience=os.getenv("BROKER_TOKEN_AUDIENCE", "hasura"),
             private_key_file=os.getenv("BROKER_PRIVATE_KEY_FILE", "/run/broker-keys/private.pem"),
             public_key_file=os.getenv("BROKER_PUBLIC_KEY_FILE", "/run/broker-keys/public.pem"),
+            key_dir=os.getenv("BROKER_KEY_DIR", "/run/broker-keys"),
+            key_poll_seconds=int(os.getenv("BROKER_KEY_POLL_SECONDS", "15")),
             token_ttl_seconds=int(os.getenv("BROKER_TOKEN_TTL_SECONDS", "600")),
         )
 
 
 class CredentialRepository(Protocol):
     def get(self, credential_id: str) -> dict[str, Any] | None: ...
+
+
+class DecisionAudit(Protocol):
+    """Decision-only audit sink. Never receives tokens or request bodies."""
+
+    def record(
+        self,
+        decision: str,
+        credential_id: str | None = None,
+        role: str | None = None,
+        jti: str | None = None,
+        detail: str | None = None,
+    ) -> None: ...
+
+
+class PostgresDecisionAudit:
+    """Write-only INSERTs into platform.credential_decisions.
+
+    Best-effort: a failed audit write is logged but never blocks or alters an
+    auth decision (availability is chosen over audit completeness; documented
+    in docs/api-gateway/project-isolation/BROKER.md).
+    """
+
+    def __init__(self, dsn: str):
+        self.dsn = dsn
+
+    def record(
+        self,
+        decision: str,
+        credential_id: str | None = None,
+        role: str | None = None,
+        jti: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        try:
+            import psycopg
+
+            with psycopg.connect(self.dsn, connect_timeout=2) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO platform.credential_decisions
+                        (decision, credential_id, role, jti, detail)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (decision, credential_id, role, jti, detail),
+                )
+                conn.commit()
+        except Exception:
+            AUDIT_LOGGER.warning("credential decision audit write failed", exc_info=True)
 
 
 class PostgresCredentialRepository:
@@ -71,7 +140,7 @@ class PostgresCredentialRepository:
             return conn.execute(
                 """
                 SELECT credential_id, project_id, credential_kind, secret_hash,
-                       status, revoked_at
+                       status, revoked_at, scopes
                 FROM platform.api_credentials
                 WHERE credential_id = %s
                 """,
@@ -82,28 +151,62 @@ class PostgresCredentialRepository:
 class ExchangeBody(BaseModel):
     key_id: str = Field(min_length=12, max_length=80, pattern=r"^(pub|svc)_[A-Za-z0-9_-]+$")
     key_secret: str | None = Field(default=None, min_length=32, max_length=160)
+    scope: str | None = Field(default=None, min_length=3, max_length=32, pattern=r"^[a-z_]+$")
 
 
-class IpRateLimit:
-    """Single-process guardrail; Nginx remains the perimeter rate limiter."""
+class _Signer(Protocol):
+    def sign(self, claims: dict[str, Any]) -> str: ...
+    def key_for_kid(self, kid: str | None) -> str: ...
+    def all_keys(self) -> dict[str, str]: ...
+    def jwks(self) -> dict: ...
 
-    def __init__(self, limit: int, window_seconds: int = 60):
-        self.limit = limit
-        self.window_seconds = window_seconds
-        self.hits: dict[tuple[str, int], int] = {}
-        self.lock = threading.Lock()
 
-    def allow(self, ip: str, now: float | None = None) -> bool:
-        now = time.time() if now is None else now
-        bucket = int(now // self.window_seconds)
-        key = (ip, bucket)
-        with self.lock:
-            count = self.hits.get(key, 0) + 1
-            self.hits[key] = count
-            # Bound memory while removing expired windows.
-            for old in [item for item in self.hits if item[1] < bucket - 1]:
-                self.hits.pop(old, None)
-            return count <= self.limit
+class _LegacySigner:
+    """Single keypair passed explicitly (tests and pre-rotation deployments)."""
+
+    def __init__(self, private_key: str, public_key: str):
+        self._private = private_key
+        self._public = public_key
+
+    def sign(self, claims: dict[str, Any]) -> str:
+        return jwt.encode(claims, self._private, algorithm="RS256")
+
+    def key_for_kid(self, kid: str | None) -> str:
+        if kid in (None, LEGACY_KID):
+            return self._public
+        raise KeyError(f"unknown kid: {kid}")
+
+    def all_keys(self) -> dict[str, str]:
+        return {LEGACY_KID: self._public}
+
+    def jwks(self) -> dict:
+        from keys import _public_to_jwk
+
+        return {"keys": [_public_to_jwk(self._public, LEGACY_KID)]}
+
+
+class _StoreSigner:
+    """KeyStore-backed signer: newest kid signs, every kid verifies."""
+
+    def __init__(self, store: KeyStore):
+        self._store = store
+
+    def sign(self, claims: dict[str, Any]) -> str:
+        self._store.maybe_refresh()
+        kid, private = self._store.signing_key()
+        return jwt.encode(claims, private, algorithm="RS256", headers={"kid": kid})
+
+    def key_for_kid(self, kid: str | None) -> str:
+        self._store.maybe_refresh()
+        return self._store.verification_key(kid)
+
+    def all_keys(self) -> dict[str, str]:
+        self._store.maybe_refresh()
+        return self._store.verification_keys()
+
+    def jwks(self) -> dict:
+        self._store.maybe_refresh()
+        return self._store.jwks()
 
 
 def create_app(
@@ -112,13 +215,26 @@ def create_app(
     auth_verify: Callable[[str], bool] | None = None,
     private_key: str | None = None,
     public_key: str | None = None,
+    audit: DecisionAudit | None = None,
+    key_store: KeyStore | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     repository = repository or PostgresCredentialRepository(settings.database_url)
-    private_key = private_key or Path(settings.private_key_file).read_text()
-    public_key = public_key or Path(settings.public_key_file).read_text()
+    audit = audit or PostgresDecisionAudit(settings.database_url)
+    if key_store is not None:
+        signer: _Signer = _StoreSigner(key_store)
+    elif private_key is not None or public_key is not None:
+        signer = _LegacySigner(private_key or "", public_key or "")
+    elif key_dir_configured() or Path(settings.key_dir).is_dir():
+        signer = _StoreSigner(KeyStore(settings.key_dir, settings.key_poll_seconds))
+    else:
+        signer = _LegacySigner(
+            Path(settings.private_key_file).read_text(),
+            Path(settings.public_key_file).read_text(),
+        )
 
     def verify_nhost_token(token: str) -> bool:
+        # Fail fast: no broker-internal retry. Retry lives caller-side.
         try:
             response = httpx.post(
                 settings.auth_url + "/token/verify",
@@ -135,8 +251,11 @@ def create_app(
 
     auth_verify = auth_verify or verify_nhost_token
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    public_limiter = IpRateLimit(60)
-    service_limiter = IpRateLimit(10)
+    limiters = ExchangeLimiters()
+
+    def denied(detail: str, **context: Any) -> Unauthorized:
+        audit.record("denied", detail=detail, **context)
+        return Unauthorized(detail)
 
     @app.exception_handler(Unauthorized)
     async def unauthorized_handler(_request: Request, _exc: Unauthorized):
@@ -150,50 +269,44 @@ def create_app(
     def healthz():
         return {"status": "ok"}
 
+    @app.get("/.well-known/jwks.json")
+    def jwks():
+        return JSONResponse(signer.jwks())
+
     @app.post("/v1/token")
     def exchange_token(body: ExchangeBody, request: Request):
         ip = request.client.host if request.client else "unknown"
         kind = "public" if body.key_id.startswith("pub_") else "service"
-        limiter = public_limiter if kind == "public" else service_limiter
-        if not limiter.allow(ip):
+        cap = limiters.check(kind, ip, body.key_id)
+        if cap is not None:
+            total = limiters.deny_counter.inc(cap)
+            AUDIT_LOGGER.warning("exchange %s count=%d", cap, total)
+            audit.record("denied", credential_id=body.key_id, detail=cap)
             return JSONResponse(status_code=429, content={"message": "rate limit exceeded"})
 
         row = repository.get(body.key_id)
-        if not row or row["status"] != "active" or row["revoked_at"] is not None:
-            raise Unauthorized
-        if row["credential_kind"] != kind:
-            raise Unauthorized
-
-        if kind == "public":
-            if body.key_secret is not None or row["secret_hash"] is not None:
-                raise Unauthorized
-            role = PUBLIC_ROLE
-        else:
-            if not body.key_secret or row["secret_hash"] is None:
-                raise Unauthorized
-            presented_hash = hashlib.sha256(body.key_secret.encode()).digest()
-            stored_hash = bytes(row["secret_hash"])
-            if not hmac.compare_digest(presented_hash, stored_hash):
-                raise Unauthorized
-            role = SERVICE_ROLE
-
-        now = int(time.time())
-        claims = {
-            "iss": settings.issuer,
-            "aud": settings.audience,
-            "sub": body.key_id,
-            "iat": now,
-            "nbf": now,
-            "exp": now + settings.token_ttl_seconds,
-            "credential_kind": kind,
-            "project_id": row["project_id"],
-            HASURA_CLAIMS: {
-                "x-hasura-allowed-roles": [role],
-                "x-hasura-default-role": role,
-                "x-hasura-project-id": str(row["project_id"]),
-            },
-        }
-        token = jwt.encode(claims, private_key, algorithm="RS256")
+        try:
+            check_credential_active(row)
+            assert row is not None
+            if row["credential_kind"] != kind:
+                raise TokenDenied("kind_mismatch")
+            token, token_jti, role, _scope = mint_with_secret(
+                row,
+                kind,
+                body.key_secret,
+                body.scope,
+                issuer=settings.issuer,
+                audience=settings.audience,
+                ttl_seconds=settings.token_ttl_seconds,
+                sign=signer.sign,
+            )
+        except TokenDenied as exc:
+            raise denied(
+                exc.detail,
+                credential_id=body.key_id,
+                jti=exc.context.get("jti"),
+            ) from exc
+        audit.record("issued", credential_id=body.key_id, role=role, jti=token_jti, detail="exchange")
         return {
             "access_token": token,
             "token_type": "Bearer",
@@ -214,9 +327,7 @@ def create_app(
 
         unverified = _decode_unverified(token)
         if unverified.get("iss") == settings.issuer:
-            return _authorize_broker_token(
-                token, headers, settings, public_key, repository
-            )
+            return _authorize_broker_token(token, headers)
 
         # Existing Nhost user JWTs are verified by Nhost Auth itself. The hook
         # only reads their claims after the Auth service returns success.
@@ -250,13 +361,58 @@ def create_app(
         requested_role = headers.get("x-hasura-role")
         if requested_role not in (None, "user"):
             raise Unauthorized
+        audit.record("allowed", role="user", detail="nhost_user")
         return {
             "x-hasura-user-id": user_id,
             "x-hasura-role": "user",
             "x-hasura-allowed-roles": ["user"],
         }
 
+    def _authorize_broker_token(token: str, headers: dict[str, Any]) -> dict[str, str | list[str]]:
+        try:
+            claims = verify_broker_token(
+                token,
+                issuer=settings.issuer,
+                key_for_kid=signer.key_for_kid,
+                try_all_keys=signer.all_keys,
+            )
+        except TokenDenied as exc:
+            raise denied("invalid_token", jti=_safe_jti(token)) from exc
+
+        credential_id = claims["sub"]
+        row = repository.get(credential_id)
+        try:
+            check_credential_active(row)
+            assert row is not None
+            session = authorize_hook_token(claims, row, headers, audience=settings.audience)
+        except TokenDenied as exc:
+            raise denied(
+                exc.detail,
+                credential_id=exc.context.get("credential_id", credential_id),
+                jti=exc.context.get("jti"),
+            ) from exc
+        audit.record(
+            "allowed",
+            credential_id=credential_id,
+            role=str(session["x-hasura-role"]),
+            jti=claims.get("jti"),
+            detail="hook",
+        )
+        return session
+
     return app
+
+
+def _safe_jti(token: str) -> str | None:
+    try:
+        claims = jwt.decode(
+            token,
+            options={"verify_signature": False, "verify_exp": False, "verify_aud": False},
+        )
+    except jwt.PyJWTError:
+        return None
+    jti = claims.get("jti") if isinstance(claims, dict) else None
+    return str(jti) if jti else None
 
 
 def _decode_unverified(token: str) -> dict[str, Any]:
@@ -268,52 +424,3 @@ def _decode_unverified(token: str) -> dict[str, Any]:
     except jwt.PyJWTError as exc:
         raise Unauthorized from exc
     return value if isinstance(value, dict) else {}
-
-
-def _authorize_broker_token(
-    token: str,
-    headers: dict[str, Any],
-    settings: Settings,
-    public_key: str,
-    repository: CredentialRepository,
-) -> dict[str, str | list[str]]:
-    try:
-        claims = jwt.decode(
-            token,
-            public_key,
-            algorithms=["RS256"],
-            issuer=settings.issuer,
-            audience=settings.audience,
-            options={"require": ["exp", "iat", "iss", "aud", "sub"]},
-        )
-    except jwt.PyJWTError as exc:
-        raise Unauthorized from exc
-
-    credential_id = claims["sub"]
-    row = repository.get(credential_id)
-    if not row or row["status"] != "active" or row["revoked_at"] is not None:
-        raise Unauthorized
-    role = PUBLIC_ROLE if row["credential_kind"] == "public" else SERVICE_ROLE
-    expected_kind = "public" if role == PUBLIC_ROLE else "service"
-    if (
-        claims.get("credential_kind") != expected_kind
-        or str(claims.get("project_id")) != str(row["project_id"])
-    ):
-        raise Unauthorized
-    namespace = claims.get(HASURA_CLAIMS)
-    if not isinstance(namespace, dict):
-        raise Unauthorized
-    if (
-        namespace.get("x-hasura-default-role") != role
-        or namespace.get("x-hasura-allowed-roles") != [role]
-        or str(namespace.get("x-hasura-project-id")) != str(row["project_id"])
-    ):
-        raise Unauthorized
-    requested_role = headers.get("x-hasura-role")
-    if requested_role not in (None, role):
-        raise Unauthorized
-    return {
-        "x-hasura-role": role,
-        "x-hasura-allowed-roles": [role],
-        "x-hasura-project-id": str(row["project_id"]),
-    }

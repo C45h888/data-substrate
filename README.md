@@ -39,10 +39,14 @@ limited to curated fields. Public/service roles require a signed project claim;
 the `user` role additionally requires active project membership. Sensitive
 financial and administrative tables remain unavailable to client roles.
 
-The credential broker is not implemented. The deployed Hasura Community Edition
-configuration cannot verify both the existing Nhost Auth JWT issuer and a
-separate broker issuer using the planned multi-verifier setting. Resolve the
-auth-hook versus licensed-edition decision before issuing broker tokens.
+The paid Hasura edition is retired: Hasura Community Edition plus a POST auth
+hook is the approved architecture. The credential broker (exchange endpoint,
+auth hook validating both broker RS256 tokens and Nhost Auth JWTs, decision
+audit log, per-credential rate caps) is drafted in `broker/` and the tiered
+status is tracked in `docs/FEATURE_ASSESSMENT.md`. It is a local draft: no
+broker key, credential, or hook has been deployed, and issuance stays gated on
+the staged isolation/revocation/expiry matrix in
+`docs/api-gateway/project-isolation/BROKER.md`.
 
 ## Review before deployment
 
